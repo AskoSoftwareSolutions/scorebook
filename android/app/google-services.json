@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "465584382891",
+    "firebase_url": "https://scorebook-17985-default-rtdb.firebaseio.com",
+    "project_id": "scorebook-17985",
+    "storage_bucket": "scorebook-17985.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:465584382891:android:060d89c654b1d954e2e8ee",
+        "android_client_info": {
+          "package_name": "com.asko.score_book"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "465584382891-ndehpti605hd9qldoqrigiloc7atnlnl.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.asko.score_book",
+            "certificate_hash": "6dd8f34c9bf5d2070f4ea31a6c6bd175f7f4ac6d"
+          }
+        },
+        {
+          "client_id": "465584382891-rvdokppdjfn87k3d6rckoriplrhe35eq.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDvVgm464uOGWYlCTy1b2ZX6Y_u96dUsU8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "465584382891-rvdokppdjfn87k3d6rckoriplrhe35eq.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "465584382891-b7aar77l6r797urdhvj0kfothidge90j.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.scoringCount"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

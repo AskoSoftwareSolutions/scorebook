@@ -1,0 +1,39 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "scorebook-17985",
+          "appId": "1:465584382891:android:060d89c654b1d954e2e8ee",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "scorebook-17985",
+          "appId": "1:465584382891:ios:05ff19dfea58f8aee2e8ee",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "scorebook-17985",
+          "configurations": {
+            "android": "1:465584382891:android:060d89c654b1d954e2e8ee",
+            "ios": "1:465584382891:ios:05ff19dfea58f8aee2e8ee",
+            "web": "1:465584382891:web:773e774cda319413e2e8ee"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ]
+  }
+}
