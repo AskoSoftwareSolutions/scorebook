@@ -132,6 +132,20 @@ class TournamentDetailView extends StatelessWidget {
     switch (m.status) {
       case TournamentMatchStatus.scheduled:
       case TournamentMatchStatus.tossPending:
+        // Edit / toss allowed only until 20 min before scheduled start.
+        final editCutoff =
+            m.scheduledTime.subtract(const Duration(minutes: 20));
+        if (DateTime.now().isAfter(editCutoff)) {
+          Get.snackbar(
+            'Edit window closed',
+            'Match edits are locked within 20 minutes of start time.',
+            snackPosition: SnackPosition.BOTTOM,
+            backgroundColor: AppTheme.warning,
+            colorText: Colors.white,
+            duration: const Duration(seconds: 3),
+          );
+          return;
+        }
         Get.toNamed(AppRoutes.tournamentToss, arguments: {
           'tournamentId': m.tournamentId,
           'matchId':      m.id,

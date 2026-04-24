@@ -17,6 +17,7 @@ class LiveScoringView extends StatefulWidget {
 
 class _LiveScoringViewState extends State<LiveScoringView> {
   late final LiveScoringViewModel vm;
+  bool _autoPickedOnEntry = false;
 
   @override
   void initState() {
@@ -38,6 +39,46 @@ class _LiveScoringViewState extends State<LiveScoringView> {
         if (mounted) _showInnings1CompleteSheet(context, vm);
       });
     });
+
+    ever(vm.needAddMorePlayersDecision, (bool need) {
+      if (!need) return;
+      vm.needAddMorePlayersDecision.value = false;
+      Future.delayed(const Duration(milliseconds: 120), () {
+        if (mounted) _showAddMoreOrEndDialog(context, vm);
+      });
+    });
+
+    // Auto-open striker / non-striker / bowler picker on entry if any are null.
+    // Fires once loadMatch finishes (isLoading → false).
+    ever(vm.isLoading, (bool loading) {
+      if (loading) return;
+      if (_autoPickedOnEntry) return;
+      if (vm.match.value == null) return;
+      if (vm.isInningsComplete.value) return;
+      _autoPickedOnEntry = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        await _autoPickMissingRoles();
+      });
+    });
+  }
+
+  /// Sequentially prompt for striker → non-striker → bowler if null.
+  Future<void> _autoPickMissingRoles() async {
+    // Small delay so the first frame / ads / snackbars don't swallow the dialog.
+    await Future.delayed(const Duration(milliseconds: 250));
+    if (!mounted) return;
+    if (vm.striker.value == null) {
+      await _selectBatsmanDialog(context, isStriker: true);
+      if (!mounted) return;
+    }
+    if (vm.nonStriker.value == null) {
+      await _selectBatsmanDialog(context, isStriker: false);
+      if (!mounted) return;
+    }
+    if (vm.currentBowler.value == null) {
+      await _selectBowlerDialog(context);
+    }
   }
 
   void _showInnings1CompleteSheet(
@@ -222,6 +263,57 @@ class _LiveScoringViewState extends State<LiveScoringView> {
   }
 
   // ── Dialog helpers for new layout ───────────────────────────────────────
+
+  /// Shown when the batting team runs out of wickets BUT the squad has fewer
+  /// than 11 registered players — scorer can add more or end innings.
+  Future<void> _showAddMoreOrEndDialog(
+      BuildContext context, LiveScoringViewModel vm) async {
+    final choice = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgCard,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14)),
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: AppTheme.warning),
+            SizedBox(width: 8),
+            Text('All batsmen out'),
+          ],
+        ),
+        content: const Text(
+          'Your team has fewer than 11 players and all batsmen are out.\n\n'
+          'Do you want to add more players and continue, or end the innings?',
+          style: TextStyle(fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'end'),
+            child: const Text('End Innings',
+                style: TextStyle(color: AppTheme.error)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.primary),
+            onPressed: () => Navigator.pop(ctx, 'add'),
+            child: const Text('Add Player',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'add') {
+      // Let user add a new batsman via picker → auto-place at striker end
+      vm.needNewBatsman.value = false; // ensure clean state
+      // Force new batsman at striker end (same position that just fell)
+      _selectNewBatsmanAfterWicket(context, vm);
+    } else if (choice == 'end') {
+      await vm.forceEndInnings();
+    }
+  }
+
   Future<void> _selectBatsmanDialog(BuildContext context,
       {required bool isStriker}) async {
     final picked = await PlayerSearchPickerDialog.show<PlayerModel>(

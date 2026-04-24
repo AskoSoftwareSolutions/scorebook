@@ -32,6 +32,7 @@ import 'views/tournament/tournament_teams_view.dart';
 import 'views/tournament/tournament_schedule_view.dart';
 import 'views/tournament/tournament_detail_view.dart';
 import 'views/tournament/tournament_toss_view.dart';
+import 'views/celebration/celebration_share_view.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -91,7 +92,7 @@ class CricketScorerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GetMaterialApp(
-      title: 'Cricket Scorer',
+      title: 'ScoreBook',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
       themeMode: ThemeMode.light,
@@ -116,6 +117,7 @@ class CricketScorerApp extends StatelessWidget {
         GetPage(name: AppRoutes.tournamentDetail,   page: () => const TournamentDetailView()),
         GetPage(name: AppRoutes.tournamentToss, page: () => const TournamentTossView()),
         GetPage(name: AppRoutes.tournamentPoster, page: () => const TournamentPosterView()),
+        GetPage(name: AppRoutes.celebration, page: () => const CelebrationShareView()),
       ],
     );
   }

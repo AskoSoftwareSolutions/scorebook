@@ -5,10 +5,15 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AD SERVICE
-// Rewarded Interstitial Video:
-//   - Shows on: Match Start, Wicket, Over Complete
-//   - Video plays for 5 seconds → Skip button appears
-//   - No banner ads
+//
+// AdMob units (production):
+//   Banner       → ca-app-pub-5068572099745859/5786908322 (scorebook_ads)
+//   Interstitial → ca-app-pub-5068572099745859/7680087268 (score_book_interstitial)
+//   Rewarded     → ca-app-pub-5068572099745859/7663096771 (score_book_reward)
+//
+// NOTE: If "Partner bidding" checkbox is ticked in AdMob console for any of
+//       these units, standard AdMob demand will NOT fill them. Uncheck it
+//       unless you're using a third-party mediation platform.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class AdService with WidgetsBindingObserver {
@@ -16,35 +21,54 @@ class AdService with WidgetsBindingObserver {
   factory AdService() => _i;
   AdService._();
 
-  // ── flip to false after AdMob approval ───────────────────────────────────
-  static const bool _useTestAds = false; // Production ready! false kodutha production
+  // ── flip to true during dev to force test creatives ──────────────────────
+  static const bool _useTestAds = false;
 
-// Test IDs (Google official)
-  static const _tRewarded    = 'ca-app-pub-3940256099942544/5354046379';
-  static const _tRewardedIos = 'ca-app-pub-3940256099942544/6978759866';
+  // Google official test IDs
+  static const _tBanner        = 'ca-app-pub-3940256099942544/6300978111';
+  static const _tBannerIos     = 'ca-app-pub-3940256099942544/2934735716';
+  static const _tInterstitial  = 'ca-app-pub-3940256099942544/1033173712';
+  static const _tInterstitialI = 'ca-app-pub-3940256099942544/4411468910';
+  static const _tRewarded      = 'ca-app-pub-3940256099942544/5224354917';
+  static const _tRewardedIos   = 'ca-app-pub-3940256099942544/1712485313';
 
-// Your Real IDs ✅
-  static const _rRewarded    = 'ca-app-pub-5068572099745859/7663096771';
-  static const _rRewardedIos = 'ca-app-pub-5068572099745859/7663096771';
+  // Production IDs
+  static const _rBanner       = 'ca-app-pub-5068572099745859/5786908322';
+  static const _rInterstitial = 'ca-app-pub-5068572099745859/7680087268';
+  static const _rRewarded     = 'ca-app-pub-5068572099745859/7663096771';
 
-  static String get _rewardedId =>
-      _useTestAds ? (Platform.isIOS ? _tRewardedIos : _tRewarded)
-          : (Platform.isIOS ? _rRewardedIos  : _rRewarded);
+  static String get _bannerId => _useTestAds
+      ? (Platform.isIOS ? _tBannerIos : _tBanner)
+      : _rBanner;
+  static String get _interstitialId => _useTestAds
+      ? (Platform.isIOS ? _tInterstitialI : _tInterstitial)
+      : _rInterstitial;
+  static String get _rewardedId => _useTestAds
+      ? (Platform.isIOS ? _tRewardedIos : _tRewarded)
+      : _rRewarded;
 
-  bool _initialized    = false;
-  bool _adsEnabled     = true;
+  bool _initialized = false;
+  bool _adsEnabled  = true;
 
-  // ── Rewarded Interstitial state ───────────────────────────────────────────
-  RewardedInterstitialAd? _rewardedAd;
+  // ── Interstitial ──────────────────────────────────────────────────────────
+  InterstitialAd? _interstitialAd;
+  bool _interstitialReady   = false;
+  bool _interstitialPending = false;
+
+  // ── Rewarded ──────────────────────────────────────────────────────────────
+  RewardedAd? _rewardedAd;
   bool _rewardedReady   = false;
   bool _rewardedPending = false;
-  bool _isShowing       = false;
 
-  // ── Cooldown — prevent multiple ads back to back ──────────────────────────
+  bool _isShowing = false;
+
+  // ── Cooldown ──────────────────────────────────────────────────────────────
   DateTime? _lastShown;
-  static const _cooldown = Duration(seconds: 60); // min 60sec between ads
+  static const _cooldown = Duration(seconds: 45);
 
-  // ── Initialize ────────────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  // INITIALIZE
+  // ══════════════════════════════════════════════════════════════════════════
   Future<void> initialize() async {
     if (_initialized) return;
     await MobileAds.instance.initialize();
@@ -54,86 +78,168 @@ class AdService with WidgetsBindingObserver {
         testDeviceIds: ['5204E240A3034C8E3DEDD3F2343A89D9'],
       ),
     );
-    print('[AdService] initialized — testAds=$_useTestAds  id=$_rewardedId');
+    debugPrint(
+        '[AdService] initialized — testAds=$_useTestAds  '
+        'banner=$_bannerId  interstitial=$_interstitialId  rewarded=$_rewardedId');
+    _loadInterstitial();
     _loadRewarded();
   }
 
-  // ── Subscription control ──────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  // SUBSCRIPTION CONTROL
+  // ══════════════════════════════════════════════════════════════════════════
   void setAdsEnabled(bool enabled) {
     _adsEnabled = enabled;
     if (!enabled) {
+      _interstitialAd?.dispose();
+      _interstitialAd = null;
+      _interstitialReady = false;
+      _interstitialPending = false;
+
       _rewardedAd?.dispose();
-      _rewardedAd     = null;
-      _rewardedReady  = false;
+      _rewardedAd = null;
+      _rewardedReady = false;
       _rewardedPending = false;
     } else {
+      _loadInterstitial();
       _loadRewarded();
     }
   }
 
   bool get adsEnabled => _adsEnabled;
 
-  // No banner
-  Widget buildBanner() => const SizedBox.shrink();
-
-  // ── Cooldown check ────────────────────────────────────────────────────────
   bool get _canShow {
     if (_lastShown == null) return true;
     return DateTime.now().difference(_lastShown!) >= _cooldown;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // LOAD
+  // BANNER — real AdMob banner widget
+  // ══════════════════════════════════════════════════════════════════════════
+  Widget buildBanner({AdSize size = AdSize.banner}) {
+    if (!_adsEnabled) return const SizedBox.shrink();
+    return _BannerAdWidget(adUnitId: _bannerId, size: size);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // INTERSTITIAL
+  // ══════════════════════════════════════════════════════════════════════════
+  void _loadInterstitial() {
+    if (!_adsEnabled || !_initialized) return;
+    if (_interstitialAd != null) return;
+    debugPrint('[AdService] loading interstitial...');
+    InterstitialAd.load(
+      adUnitId: _interstitialId,
+      request: const AdRequest(),
+      adLoadCallback: InterstitialAdLoadCallback(
+        onAdLoaded: (ad) {
+          debugPrint('[AdService] interstitial LOADED');
+          _interstitialAd = ad;
+          _interstitialReady = true;
+          ad.fullScreenContentCallback = FullScreenContentCallback(
+            onAdShowedFullScreenContent: (_) {
+              _isShowing = true;
+              _lastShown = DateTime.now();
+            },
+            onAdDismissedFullScreenContent: (ad) {
+              _isShowing = false;
+              ad.dispose();
+              _interstitialAd = null;
+              _interstitialReady = false;
+              _loadInterstitial();
+            },
+            onAdFailedToShowFullScreenContent: (ad, err) {
+              debugPrint('[AdService] interstitial show FAILED: $err');
+              _isShowing = false;
+              ad.dispose();
+              _interstitialAd = null;
+              _interstitialReady = false;
+              _loadInterstitial();
+            },
+          );
+          if (_interstitialPending) {
+            _interstitialPending = false;
+            _showInterstitial();
+          }
+        },
+        onAdFailedToLoad: (err) {
+          debugPrint('[AdService] interstitial load FAILED: $err');
+          _interstitialAd = null;
+          _interstitialReady = false;
+          _interstitialPending = false;
+          Future.delayed(const Duration(seconds: 30), _loadInterstitial);
+        },
+      ),
+    );
+  }
+
+  void _showInterstitial() {
+    if (!_adsEnabled || _isShowing) return;
+    if (_interstitialReady && _interstitialAd != null) {
+      _interstitialAd!.show();
+    }
+  }
+
+  /// Fire-and-forget interstitial. Silently preloads if not ready.
+  void showInterstitial() {
+    if (!_adsEnabled) return;
+    if (!_canShow) {
+      debugPrint('[AdService] cooldown — skipping interstitial');
+      return;
+    }
+    if (_interstitialReady && _interstitialAd != null) {
+      _showInterstitial();
+    } else {
+      _interstitialPending = true;
+      _loadInterstitial();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // REWARDED
   // ══════════════════════════════════════════════════════════════════════════
   void _loadRewarded() {
     if (!_adsEnabled || !_initialized) return;
     if (_rewardedAd != null) return;
-
-    print('[AdService] loading rewarded interstitial...');
-
-    RewardedInterstitialAd.load(
+    debugPrint('[AdService] loading rewarded...');
+    RewardedAd.load(
       adUnitId: _rewardedId,
       request: const AdRequest(),
-      rewardedInterstitialAdLoadCallback: RewardedInterstitialAdLoadCallback(
+      rewardedAdLoadCallback: RewardedAdLoadCallback(
         onAdLoaded: (ad) {
-          print('[AdService] rewarded LOADED ✅');
-          _rewardedAd   = ad;
+          debugPrint('[AdService] rewarded LOADED');
+          _rewardedAd = ad;
           _rewardedReady = true;
-
           ad.fullScreenContentCallback = FullScreenContentCallback(
             onAdShowedFullScreenContent: (_) {
-              _isShowing  = true;
-              _lastShown  = DateTime.now();
-              print('[AdService] rewarded SHOWING 🎬');
+              _isShowing = true;
+              _lastShown = DateTime.now();
             },
             onAdDismissedFullScreenContent: (ad) {
-              print('[AdService] rewarded dismissed — reloading');
-              _isShowing    = false;
+              _isShowing = false;
               ad.dispose();
-              _rewardedAd   = null;
+              _rewardedAd = null;
               _rewardedReady = false;
-              _loadRewarded(); // preload next
+              _loadRewarded();
             },
             onAdFailedToShowFullScreenContent: (ad, err) {
-              print('[AdService] rewarded show FAILED: $err');
-              _isShowing    = false;
+              debugPrint('[AdService] rewarded show FAILED: $err');
+              _isShowing = false;
               ad.dispose();
-              _rewardedAd   = null;
+              _rewardedAd = null;
               _rewardedReady = false;
               _loadRewarded();
             },
           );
-
-          // If pending show was requested before load completed
           if (_rewardedPending) {
             _rewardedPending = false;
-            _showAd();
+            _showRewarded();
           }
         },
         onAdFailedToLoad: (err) {
-          print('[AdService] rewarded load FAILED: $err');
-          _rewardedAd      = null;
-          _rewardedReady   = false;
+          debugPrint('[AdService] rewarded load FAILED: $err');
+          _rewardedAd = null;
+          _rewardedReady = false;
           _rewardedPending = false;
           Future.delayed(const Duration(seconds: 30), _loadRewarded);
         },
@@ -141,39 +247,86 @@ class AdService with WidgetsBindingObserver {
     );
   }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // SHOW
-  // ══════════════════════════════════════════════════════════════════════════
-  void _showAd() {
+  void _showRewarded() {
     if (!_adsEnabled || _isShowing) return;
     if (_rewardedReady && _rewardedAd != null) {
-      _rewardedAd!.show(
-        onUserEarnedReward: (_, reward) {
-          print('[AdService] reward earned ✅');
-        },
-      );
+      _rewardedAd!.show(onUserEarnedReward: (_, __) {});
     }
   }
 
-  /// Call this on: Match Start, Wicket, Over Complete
+  /// Show rewarded; falls back to interstitial if rewarded not available.
   void showRewardedVideo() {
     if (!_adsEnabled) return;
-    print('[AdService] showRewardedVideo — ready=$_rewardedReady  canShow=$_canShow');
-
     if (!_canShow) {
-      print('[AdService] cooldown active — skipping');
+      debugPrint('[AdService] cooldown — skipping rewarded');
       return;
     }
-
     if (_rewardedReady && _rewardedAd != null) {
-      _showAd();
+      _showRewarded();
+    } else if (_interstitialReady && _interstitialAd != null) {
+      debugPrint('[AdService] rewarded not ready → interstitial fallback');
+      _showInterstitial();
     } else {
-      // Ad not ready — mark pending, load now, show when loaded
       _rewardedPending = true;
       _loadRewarded();
+      _loadInterstitial();
     }
   }
+}
 
-  // Keep showInterstitial as alias for compatibility
-  void showInterstitial() => showRewardedVideo();
+// ═══════════════════════════════════════════════════════════════════════════════
+// BANNER WIDGET
+// ═══════════════════════════════════════════════════════════════════════════════
+class _BannerAdWidget extends StatefulWidget {
+  final String adUnitId;
+  final AdSize size;
+  const _BannerAdWidget({required this.adUnitId, required this.size});
+
+  @override
+  State<_BannerAdWidget> createState() => _BannerAdWidgetState();
+}
+
+class _BannerAdWidgetState extends State<_BannerAdWidget> {
+  BannerAd? _ad;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  void _load() {
+    _ad = BannerAd(
+      adUnitId: widget.adUnitId,
+      size: widget.size,
+      request: const AdRequest(),
+      listener: BannerAdListener(
+        onAdLoaded: (_) {
+          if (!mounted) return;
+          setState(() => _loaded = true);
+        },
+        onAdFailedToLoad: (ad, err) {
+          debugPrint('[AdService] banner load FAILED: $err');
+          ad.dispose();
+        },
+      ),
+    )..load();
+  }
+
+  @override
+  void dispose() {
+    _ad?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_loaded || _ad == null) return const SizedBox(height: 0);
+    return SizedBox(
+      width: widget.size.width.toDouble(),
+      height: widget.size.height.toDouble(),
+      child: AdWidget(ad: _ad!),
+    );
+  }
 }

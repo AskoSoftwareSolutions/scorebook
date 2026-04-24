@@ -28,4 +28,7 @@ class AppRoutes {
   static const String tournamentToss     = '/tournament-toss';
 
   static const String tournamentPoster = '/tournament-poster';
+
+  // ── Celebration / Share ──────────────────────────────────────────────────
+  static const String celebration = '/celebration';
 }

@@ -1,6 +1,7 @@
 class AppConstants {
   // App
-  static const String appName = 'Cricket Scorer';
+  static const String appName = 'ScoreBook';
+  static const String appTagline = 'Cricket Scoring, Reinvented.';
   static const String appVersion = '1.0.0';
 
   // Database
@@ -42,5 +43,5 @@ class AppConstants {
   static const int innings2 = 2;
 
   // PDF
-  static const String pdfReportTitle = 'Cricket Match Report';
+  static const String pdfReportTitle = 'ScoreBook Match Report';
 }

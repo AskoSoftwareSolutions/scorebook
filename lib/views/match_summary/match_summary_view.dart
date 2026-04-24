@@ -100,6 +100,19 @@ class MatchSummaryView extends StatelessWidget {
 
                   const SizedBox(height: 20),
 
+                  // Celebrate & Share (MoM + Winning team cards → WhatsApp status)
+                  GradientButton(
+                    label: '🏆 Celebrate & Share',
+                    icon: Icons.celebration_outlined,
+                    onTap: () => Get.toNamed(
+                      AppRoutes.celebration,
+                      arguments: match.id,
+                    ),
+                    gradient: AppTheme.goldGradient,
+                  ),
+
+                  const SizedBox(height: 12),
+
                   // Share button
                   GradientButton(
                     label: '📤 Share PDF via WhatsApp',

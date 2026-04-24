@@ -180,6 +180,16 @@ class FirebaseSyncService {
           ? (match.teamAScore ?? 0)
           : (match.teamBScore ?? 0))
           : 0;
+      final int inn1Wickets = innings.inningsNumber == 2
+          ? (innings.bowlingTeam == match.teamAName
+          ? (match.teamAWickets ?? 0)
+          : (match.teamBWickets ?? 0))
+          : 0;
+      final int inn1Balls = innings.inningsNumber == 2
+          ? (innings.bowlingTeam == match.teamAName
+          ? (match.teamABalls ?? 0)
+          : (match.teamBBalls ?? 0))
+          : 0;
       final int target = inn1Score + 1;
       final int runsNeeded = target - innings.totalRuns;
       final int ballsLeft = match.totalOvers * 6 - innings.totalBalls;
@@ -229,7 +239,8 @@ class FirebaseSyncService {
         'runsNeeded': innings.inningsNumber == 2 ? runsNeeded : 0,
         'ballsLeft': innings.inningsNumber == 2 ? ballsLeft : 0,
         'inn1Score': inn1Score,
-        'inn1Wickets': match.teamAScore != null ? (match.teamAWickets ?? 0) : 0,
+        'inn1Wickets': inn1Wickets,
+        'inn1Balls': inn1Balls,
 
         // ── Partnership ───────────────────────────────────────────────────
         'partnerRuns': partnerRuns,
