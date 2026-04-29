@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:scoring_count/services/fcm_service.dart';
+import 'package:scoring_count/services/firebase_purge_service.dart';
 import 'package:scoring_count/services/session_service.dart';
 import 'package:scoring_count/views/tournament/tournament_poster_view.dart';
 import 'firebase_options.dart'; // ✅ FlutterFire generated — run `flutterfire configure`
@@ -12,6 +13,7 @@ import 'core/theme/app_theme.dart';
 import 'repositories/match_repository.dart';
 import 'repositories/tournament_repository.dart';              // ← NEW (line 10)
 import 'services/deep_link_service.dart';
+import 'services/network_service.dart';
 import 'views/splash/splash_view.dart';
 import 'views/home/home_view.dart';
 import 'views/create_match/create_match_view.dart';
@@ -38,21 +40,71 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // ── Firebase Init ─────────────────────────────────────────────────────────
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-  // ── Load cached user phone from SharedPreferences ────────────────────
-  await SessionService().loadCachedPhone();
-  // FCM
-  await FcmService().initialize();
-// ── DEBUG: Print current auth state ───────────────────────────
+  // Firebase.initializeApp itself only reads local config — safe offline.
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    ).timeout(const Duration(seconds: 8));
+  } catch (e) {
+    debugPrint('[main] Firebase init failed/timed out: $e — continuing offline');
+  }
+
+  // ── Load cached user phone from SharedPreferences (local only) ───────────
+  try {
+    await SessionService().loadCachedPhone();
+  } catch (e) {
+    debugPrint('[main] Session load failed: $e');
+  }
+
+  // ── Connectivity monitor — start BEFORE the network-dependent services
+  //    so it can already report offline if Firebase websocket fails.
+  // ignore: unawaited_futures
+  NetworkService().start();
+
+  // ── FCM, Ads, Subscription — every one of these can hang for minutes
+  //    on a stalled network. We give each a generous-but-bounded timeout
+  //    so the splash screen never gets stuck. Fire-and-forget for the
+  //    services that don't need to be ready before the first screen.
+  // ── DEBUG: Print current auth state ───────────────────────────
   final user = FirebaseAuth.instance.currentUser;
   print('🔐 AUTH DEBUG → User: ${user?.uid}');
   print('🔐 AUTH DEBUG → Phone: ${user?.phoneNumber}');
   print('🔐 AUTH DEBUG → Anonymous: ${user?.isAnonymous}');
-  // ── Ads & Subscription ───────────────────────────────────────────────────
-  await AdService().initialize();
-  await SubscriptionService().loadSubscription();
+
+  // FCM — non-blocking. Token registration happens in the background;
+  // missing it on a cold offline launch isn't fatal (token refresh
+  // listener will kick in once the network returns).
+  // ignore: unawaited_futures
+  FcmService().initialize().timeout(
+    const Duration(seconds: 6),
+    onTimeout: () =>
+        debugPrint('[main] FCM init timed out — continuing without push'),
+  ).catchError((e) =>
+      debugPrint('[main] FCM init failed: $e — continuing without push'));
+
+  // Ads — initialize() makes a network call to fetch the SDK config but
+  // is generally quick. Bound it anyway so a flaky network can't stall
+  // the splash.
+  try {
+    await AdService().initialize().timeout(const Duration(seconds: 6));
+  } catch (e) {
+    debugPrint('[main] Ads init failed/timed out: $e — continuing without ads');
+  }
+
+  // Subscription — pure Firestore read. Falls back to "no subscription"
+  // (= ads enabled) on any error/timeout, which matches the not-logged-in
+  // default. Never block the launch on this.
+  try {
+    await SubscriptionService().loadSubscription().timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        debugPrint('[main] Subscription load timed out — continuing offline');
+        return null;
+      },
+    );
+  } catch (e) {
+    debugPrint('[main] Subscription load failed: $e');
+  }
 
   // ── Portrait only ─────────────────────────────────────────────────────────
   await SystemChrome.setPreferredOrientations([
@@ -81,7 +133,20 @@ void main() async {
   Get.put<TournamentRepository>(TournamentRepository(), permanent: true);  // ← NEW
 
   // ── Handle cold-start deep link ───────────────────────────────────────────
-  await DeepLinkService().handleInitialLink();
+  try {
+    await DeepLinkService()
+        .handleInitialLink()
+        .timeout(const Duration(seconds: 4));
+  } catch (e) {
+    debugPrint('[main] Deep link handler failed/timed out: $e');
+  }
+
+  // ── Best-effort 14-day Firebase retention sweep (fire-and-forget).
+  //    Authoritative cleanup runs in the `purgeOldMatches` Cloud Function;
+  //    this client sweep keeps the user's own footprint trim between cron
+  //    runs. Never awaited — must never delay app launch.
+  // ignore: unawaited_futures
+  FirebasePurgeService().sweepIfNeeded();
 
   runApp(const CricketScorerApp());
 }
@@ -97,6 +162,21 @@ class CricketScorerApp extends StatelessWidget {
       theme: AppTheme.darkTheme,
       themeMode: ThemeMode.light,
       initialRoute: AppRoutes.splash,
+      // Wrap every route in a Stack so the offline banner can overlay
+      // the top of any screen without each view having to opt in.
+      builder: (context, child) {
+        return Stack(
+          children: [
+            child ?? const SizedBox.shrink(),
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: GlobalOfflineBanner(),
+            ),
+          ],
+        );
+      },
       getPages: [
         GetPage(name: AppRoutes.splash,       page: () => const SplashView()),
         GetPage(name: AppRoutes.home,         page: () => const HomeView()),

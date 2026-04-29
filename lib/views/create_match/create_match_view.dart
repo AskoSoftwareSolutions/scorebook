@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../core/theme/app_theme.dart';
-import '../../services/saved_team_service.dart';
 import '../../viewmodels/match_setup_viewmodel.dart';
 import '../../widgets/app_widgets.dart';
 
@@ -11,6 +10,12 @@ class CreateMatchView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final vm = Get.put(MatchSetupViewModel());
+    // Refresh saved-team chips on every screen entry — `Get.put` returns
+    // the same instance across navigations, so without an explicit reload
+    // the list would freeze on the snapshot from when the VM was first
+    // created. Fire-and-forget; UI rebuilds via the Rx list.
+    // ignore: unawaited_futures
+    vm.loadSavedTeams();
 
     return SafeArea(
       top: false,

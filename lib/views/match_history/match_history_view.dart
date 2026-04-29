@@ -19,6 +19,31 @@ class MatchHistoryView extends StatelessWidget {
         appBar: AppBar(
           title: const Text('Match History'),
           actions: [
+            // ── Pull-from-cloud button ────────────────────────────────
+            // Forces a fresh sync from Firebase so matches scored on
+            // other devices show up here too.
+            Obx(() => IconButton(
+                  icon: vm.isCloudSyncing.value
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: AppTheme.primary),
+                        )
+                      : const Icon(Icons.cloud_download_outlined),
+                  tooltip: 'Sync from cloud',
+                  onPressed: vm.isCloudSyncing.value
+                      ? null
+                      : () async {
+                          await vm.syncFromCloud();
+                          Get.snackbar(
+                            'Cloud sync',
+                            'History updated from your other devices.',
+                            snackPosition: SnackPosition.BOTTOM,
+                            duration: const Duration(seconds: 2),
+                          );
+                        },
+                )),
             IconButton(
               icon: const Icon(Icons.refresh_rounded),
               onPressed: vm.loadHistory,

@@ -10,6 +10,7 @@ import '../../services/firebase_sync_service.dart';
 import '../../services/ad_service.dart';
 import '../../services/session_service.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/constants/app_routes.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LIVE VIEWER PAGE — Premium Redesign
@@ -110,8 +111,13 @@ class _LiveViewerPageState extends State<LiveViewerPage>
     ),
     );
     if (leave == true) {
-    await SessionService().clearWatchLive();
-    Get.back();
+      await SessionService().clearWatchLive();
+      // We may have been pushed here via Get.offAllNamed (e.g. lock-stolen
+      // auto-redirect from live scoring). In that case the nav stack only
+      // has us on it, so Get.back() has nowhere to go and the page locks.
+      // Always route home explicitly so both deep-link entry and takeover
+      // entry exit cleanly.
+      Get.offAllNamed(AppRoutes.home);
     }
   }
 
@@ -143,8 +149,9 @@ class _LiveViewerPageState extends State<LiveViewerPage>
   }
 
   // Track previous values to detect changes
-  int _prevWickets = -1;
-  int _prevBalls   = -1;
+  int _prevWickets    = -1;
+  int _prevBalls      = -1;
+  int _prevInnings    = -1;
 
   void _startListening() {
     _sub = _sync.liveStream(matchCode).listen((event) {
@@ -153,31 +160,52 @@ class _LiveViewerPageState extends State<LiveViewerPage>
         final wasNull = _data == null;
         final newData = Map<String, dynamic>.from(event.snapshot.value as Map);
 
-        // ── Show interstitial on wicket ──────────────────────────────────────
+        // ── Detect milestones for ad triggers ────────────────────────────
         if (!wasNull && _data != null) {
-          final newWickets = (newData['wickets'] as int?) ?? 0;
-          final newBalls   = (newData['totalBalls'] as int?) ?? 0;
+          final newWickets = (newData['wickets']        as int?) ?? 0;
+          final newBalls   = (newData['totalBalls']     as int?) ?? 0;
+          final newInnings = (newData['currentInnings'] as int?) ?? 1;
 
-          // Wicket fell
-          if (_prevWickets >= 0 && newWickets > _prevWickets) {
-            AdService().showRewardedVideo(); // video ad
-          }
-          // Over complete (every 6 valid balls)
-          else if (_prevBalls >= 0 && newBalls > _prevBalls &&
-              newBalls % 6 == 0 && newBalls > 0) {
-            AdService().showRewardedVideo(); // video ad
-          }
+          // Innings flip resets cloud counters from (e.g.) 119/8 to 0/0.
+          // Without this branch, `newWickets > _prevWickets` would be false
+          // for the entire innings 2, suppressing ads. Re-baseline first.
+          if (_prevInnings != -1 && newInnings != _prevInnings) {
+            debugPrint('[LiveViewer] innings flip $_prevInnings→$newInnings — re-baselining ad counters');
+            _prevWickets = newWickets;
+            _prevBalls   = newBalls;
+            _prevInnings = newInnings;
+          } else {
+            // Wicket fell
+            final wicketFell =
+                _prevWickets >= 0 && newWickets > _prevWickets;
+            // Over crossed: compare completed-over count rather than
+            // exact `newBalls % 6 == 0`, since Firebase can batch
+            // multiple balls into a single snapshot (e.g. 5 → 7) and
+            // skip the modulo check entirely.
+            final overCrossed = _prevBalls >= 0 &&
+                newBalls > _prevBalls &&
+                (newBalls ~/ 6) > (_prevBalls ~/ 6);
 
-          _prevWickets = newWickets;
-          _prevBalls   = newBalls;
+            if (wicketFell) {
+              debugPrint('[LiveViewer] WICKET ($_prevWickets → $newWickets) — requesting ad');
+              AdService().showRewardedVideo();
+            } else if (overCrossed) {
+              debugPrint('[LiveViewer] OVER COMPLETE ($_prevBalls → $newBalls) — requesting ad');
+              AdService().showRewardedVideo();
+            }
+            _prevWickets = newWickets;
+            _prevBalls   = newBalls;
+            _prevInnings = newInnings;
+          }
         } else if (wasNull) {
-          // Init values on first load
-          _prevWickets = (newData['wickets']    as int?) ?? 0;
-          _prevBalls   = (newData['totalBalls'] as int?) ?? 0;
-          // Match start — show ad when viewer first joins
-          Future.delayed(const Duration(seconds: 2), () {
-            AdService().showRewardedVideo();
-          });
+          // Init values on first load. We deliberately DO NOT fire an
+          // initial "welcome" ad here anymore — it used to start the
+          // 18 s cooldown immediately and swallow the very next wicket
+          // or over, which is exactly when viewers expect the ad to play.
+          _prevWickets = (newData['wickets']        as int?) ?? 0;
+          _prevBalls   = (newData['totalBalls']     as int?) ?? 0;
+          _prevInnings = (newData['currentInnings'] as int?) ?? 1;
+          debugPrint('[LiveViewer] baseline set — wickets=$_prevWickets balls=$_prevBalls inn=$_prevInnings');
         }
 
         setState(() {
@@ -1998,10 +2026,10 @@ class _NotFoundScreen extends StatelessWidget {
                       fontSize: 12)),
               const SizedBox(height: 28),
               TextButton.icon(
-                onPressed: () => Get.back(),
+                onPressed: () => Get.offAllNamed(AppRoutes.home),
                 icon: const Icon(Icons.arrow_back_ios_new_rounded,
                     size: 14),
-                label: const Text('Go Back'),
+                label: const Text('Go Home'),
                 style: TextButton.styleFrom(
                     foregroundColor: AppTheme.primaryLight),
               ),

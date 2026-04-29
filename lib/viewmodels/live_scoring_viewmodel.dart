@@ -4,7 +4,10 @@ import '../models/models.dart';
 import '../repositories/match_repository.dart';
 import '../services/session_service.dart';
 import '../services/firebase_sync_service.dart';
+import '../services/active_scorer_service.dart';
+import '../services/match_cloud_pull_service.dart';
 import '../services/deep_link_service.dart';
+import 'dart:async';
 import '../core/constants/app_constants.dart';
 import '../core/constants/app_routes.dart';
 import '../core/utils/app_utils.dart';
@@ -68,6 +71,14 @@ class LiveScoringViewModel extends GetxController {
   final FirebaseSyncService _firebaseSync = FirebaseSyncService();
   final DeepLinkService _deepLink = DeepLinkService();
 
+  // ── Active-scorer exclusive lock ─────────────────────────────────────────
+  /// Emits `true` exactly once when another device takes over scoring.
+  /// The view watches this and auto-exits to the live viewer page.
+  final RxBool lockLost = false.obs;
+  final ActiveScorerService _lock = ActiveScorerService();
+  final MatchCloudPullService _cloud = MatchCloudPullService();
+  StreamSubscription<bool>? _lockSub;
+
   // ── Tournament linkage (optional, populated when match came from a bracket) ─
   final RxString tournamentId      = ''.obs;
   final RxString tournamentMatchId = ''.obs;
@@ -80,6 +91,31 @@ class LiveScoringViewModel extends GetxController {
     super.onInit();
     final id = Get.arguments as int?;
     if (id != null) loadMatch(id);
+  }
+
+  @override
+  void onClose() {
+    _lockSub?.cancel();
+    _lockSub = null;
+    super.onClose();
+  }
+
+  /// Claim the active-scorer lock for [matchCode] and start watching for
+  /// ownership changes. Called every time the scorer enters or resumes
+  /// online scoring (initial online-mode toggle, app resume, innings-2
+  /// start, or join-as-scorer). A subsequent claim from another device
+  /// flips [lockLost] → the view reacts by auto-exiting to the live
+  /// viewer page.
+  Future<void> _claimAndWatchLock() async {
+    final code = matchCode.value;
+    if (code.isEmpty) return;
+    await _lock.claim(code);
+    _lockSub?.cancel();
+    _lockSub = _lock.watch(code).listen((stillOwn) {
+      if (!stillOwn && !lockLost.value) {
+        lockLost.value = true;
+      }
+    });
   }
 
   Future<void> loadMatch(int id) async {
@@ -116,6 +152,13 @@ class LiveScoringViewModel extends GetxController {
           matchCode.value     = onlineInfo.matchCode;
           matchPassword.value = onlineInfo.password;
           isOnlineMode.value  = true;
+          // Re-bind local↔cloud (idempotent), so summary view can pull.
+          await _cloud.bindLocalToCloud(id, onlineInfo.matchCode);
+          // Re-claim the active-scorer lock (in case another device took over
+          // while we were backgrounded; this device intentionally resumes
+          // scoring → overwrite. Also start listening so the next remote
+          // takeover kicks us out.)
+          await _claimAndWatchLock();
           // Re-push current snapshot so viewers get immediate update
           _syncToFirebase();
         }
@@ -498,6 +541,14 @@ class LiveScoringViewModel extends GetxController {
       matchCode: matchCode.value,
       password:  password,
     );
+    // Bind local id ↔ cloud code so that when the user later opens the
+    // match summary, we can transparently pull fresh data (handles the
+    // case where innings 2 was scored on a different device).
+    if (match.value?.id != null) {
+      await _cloud.bindLocalToCloud(match.value!.id!, matchCode.value);
+    }
+    // This device becomes the exclusive scorer; start watching for takeover.
+    await _claimAndWatchLock();
     _syncToFirebase();
     Get.snackbar(
       '🌐 Online Mode ON',
@@ -529,10 +580,15 @@ class LiveScoringViewModel extends GetxController {
     );
   }
 
-  void _syncToFirebase() {
+  /// Returns the underlying Future so callers that need to know the cloud
+  /// write has actually landed (e.g. innings-2 transition before showing
+  /// the "share with Phone B" popup) can `await` it. Most callers ignore
+  /// the future and run fire-and-forget — that's still fine, the void
+  /// dropped is harmless.
+  Future<void> _syncToFirebase() async {
     if (!isOnlineMode.value || matchCode.value.isEmpty) return;
     if (match.value == null || currentInnings.value == null) return;
-    _firebaseSync.pushLiveSnapshot(
+    await _firebaseSync.pushLiveSnapshot(
       matchCode: matchCode.value,
       passwordHash: matchPassword.value,
       match: match.value!,
@@ -655,14 +711,24 @@ class LiveScoringViewModel extends GetxController {
     await _repo.updateMatch(updated);
     match.value = updated;
 
-    final inn2 = InningsModel(
+    final inn2Seed = InningsModel(
       matchId: m.id!,
       inningsNumber: 2,
       battingTeam: inn1.bowlingTeam,
       bowlingTeam: inn1.battingTeam,
     );
-    await _repo.createInnings(inn2);
+    final inn2Id = await _repo.createInnings(inn2Seed);
 
+    // 🔑 Re-hydrate with the returned DB id so future updateInnings()
+    // calls actually match a row (WHERE id = ?). Without this, inn2.id
+    // stays null and totals silently fail to persist → Innings 2 shows 0/0.
+    final inn2 = InningsModel(
+      id: inn2Id,
+      matchId: m.id!,
+      inningsNumber: 2,
+      battingTeam: inn1.bowlingTeam,
+      bowlingTeam: inn1.battingTeam,
+    );
     currentInnings.value = inn2;
     allBalls.clear();
     currentOverBalls.clear();
@@ -683,8 +749,29 @@ class LiveScoringViewModel extends GetxController {
     }
     allPlayers.refresh();
 
-    // Sync innings 2 start to Firebase
-    if (isOnlineMode.value) _syncToFirebase();
+    // Sync innings 2 start to Firebase + re-affirm this device as the
+    // active scorer (covers the case where innings-1 was done on this
+    // device and innings-2 continues here — no takeover happens, but we
+    // want the lock row present so a later takeover is detectable).
+    //
+    // ⚠️ The cloud write here MUST land before the share-with-Phone-B
+    // popup appears, otherwise Phone B can enter the code+password and
+    // the takeover gate (`join_scorer_service`) will read currentInnings
+    // = 1 from cloud and reject with "Innings 1 not complete yet".
+    // That's why this is awaited — and bounded with a timeout so a
+    // flaky network can't lock up the UI.
+    if (isOnlineMode.value) {
+      await _claimAndWatchLock();
+      try {
+        await _syncToFirebase().timeout(const Duration(seconds: 6));
+      } catch (e) {
+        // Swallow — the popup still shows. If the cloud was unreachable
+        // the global offline banner will already be visible and the
+        // user can retry from there.
+        // ignore: avoid_print
+        print('⚠️ innings-2 cloud sync failed/timed out: $e');
+      }
+    }
 
     Get.snackbar(
       'Innings 2',
@@ -761,6 +848,12 @@ class LiveScoringViewModel extends GetxController {
         result: result,
         match: updated,
       );
+      // Match is over — release the active-scorer lock so the node is
+      // clean. Other devices opening this code will now just hydrate
+      // from history, no scoring lock remains.
+      await _lock.release(matchCode.value);
+      _lockSub?.cancel();
+      _lockSub = null;
     }
 
     await _session.clearActiveMatch();

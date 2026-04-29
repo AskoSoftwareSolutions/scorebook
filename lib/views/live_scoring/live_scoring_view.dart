@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import '../../core/constants/app_routes.dart';
 import '../../core/theme/app_theme.dart';
 import '../../services/ad_service.dart';
+import '../../services/session_service.dart';
 import '../../core/utils/app_utils.dart';
 import '../../viewmodels/live_scoring_viewmodel.dart';
 import '../../models/models.dart';
@@ -45,6 +46,43 @@ class _LiveScoringViewState extends State<LiveScoringView> {
       vm.needAddMorePlayersDecision.value = false;
       Future.delayed(const Duration(milliseconds: 120), () {
         if (mounted) _showAddMoreOrEndDialog(context, vm);
+      });
+    });
+
+    // ── Exclusive scorer lock ────────────────────────────────────────────
+    // If another device takes over scoring (e.g. team B scorer joins for
+    // innings 2), kick this device out of live scoring and drop them on
+    // the watch-live screen with the same match code so they keep seeing
+    // the score read-only.
+    ever(vm.lockLost, (bool lost) {
+      if (!lost) return;
+      vm.lockLost.value = false;
+      final code = vm.matchCode.value;
+      // We are no longer the active scorer — another device took the lock.
+      // Clear the local "resume scoring" pointer so home doesn't keep
+      // offering a stale Resume button after the takeover device finishes.
+      // ignore: unawaited_futures
+      SessionService().clearActiveMatch();
+      Get.snackbar(
+        'Another scorer took over',
+        'This match is now being scored on another device. Switching to view mode.',
+        snackPosition: SnackPosition.BOTTOM,
+        duration: const Duration(seconds: 4),
+        backgroundColor: AppTheme.warning,
+        colorText: Colors.white,
+      );
+      Future.delayed(const Duration(milliseconds: 250), () {
+        if (!mounted) return;
+        if (code.isEmpty) {
+          Get.offAllNamed(AppRoutes.home);
+        } else {
+          // We were the legit scorer just a moment ago, so skip the
+          // password gate on the viewer page.
+          Get.offAllNamed(
+            AppRoutes.liveViewer,
+            arguments: {'matchCode': code, 'authenticated': true},
+          );
+        }
       });
     });
 
