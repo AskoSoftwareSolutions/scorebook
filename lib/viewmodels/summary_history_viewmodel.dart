@@ -8,6 +8,8 @@ import '../models/models.dart';
 import '../repositories/match_repository.dart';
 import '../services/pdf_service.dart';
 import '../services/share_service.dart';
+import '../services/match_cloud_pull_service.dart';
+import '../services/firebase_sync_service.dart';
 
 class MatchSummaryViewModel extends GetxController {
   final MatchRepository _repo = Get.find<MatchRepository>();
@@ -33,6 +35,7 @@ class MatchSummaryViewModel extends GetxController {
   Future<void> loadMatchSummary(int matchId) async {
     isLoading.value = true;
     try {
+      // ── 1. Load whatever we have locally first (instant render) ─────
       match.value = await _repo.getMatch(matchId);
       innings1.value = await _repo.getInnings(matchId, 1);
       innings2.value = await _repo.getInnings(matchId, 2);
@@ -40,6 +43,26 @@ class MatchSummaryViewModel extends GetxController {
           await _repo.getPlayersByTeam(matchId, match.value!.teamAName);
       teamBPlayers.value =
           await _repo.getPlayersByTeam(matchId, match.value!.teamBName);
+
+      // ── 2. If this match was scored in online mode, pull a fresh
+      //       snapshot from Firebase. This handles the cross-device
+      //       case: innings 2 was scored on a different phone and our
+      //       local DB has the outdated picture. The pull is idempotent.
+      final cloudCode = await MatchCloudPullService().cloudCodeFor(matchId);
+      if (cloudCode != null && cloudCode.isNotEmpty) {
+        final pulledLocalId =
+            await MatchCloudPullService().pullIntoLocal(cloudCode);
+        if (pulledLocalId != null && pulledLocalId == matchId) {
+          // Re-read from local — totals, balls, players were just upserted.
+          match.value = await _repo.getMatch(matchId);
+          innings1.value = await _repo.getInnings(matchId, 1);
+          innings2.value = await _repo.getInnings(matchId, 2);
+          teamAPlayers.value =
+              await _repo.getPlayersByTeam(matchId, match.value!.teamAName);
+          teamBPlayers.value =
+              await _repo.getPlayersByTeam(matchId, match.value!.teamBName);
+        }
+      }
     } finally {
       isLoading.value = false;
     }
@@ -102,11 +125,14 @@ class MatchHistoryViewModel extends GetxController {
 
   final RxList<MatchModel> matches = <MatchModel>[].obs;
   final RxBool isLoading = false.obs;
+  final RxBool isCloudSyncing = false.obs;
 
   @override
   void onInit() {
     super.onInit();
     loadHistory();
+    // Background — pull any cloud matches I scored on other devices.
+    syncFromCloud();
   }
 
   Future<void> loadHistory() async {
@@ -115,6 +141,27 @@ class MatchHistoryViewModel extends GetxController {
       matches.value = await _repo.getAllMatches();
     } finally {
       isLoading.value = false;
+    }
+  }
+
+  /// Best-effort: read /user_matches/{phone} from Firebase and pull
+  /// every match into local SQLite. After this completes, [loadHistory]
+  /// is called again so the list reflects new entries.
+  Future<void> syncFromCloud() async {
+    if (isCloudSyncing.value) return;
+    isCloudSyncing.value = true;
+    try {
+      final list = await FirebaseSyncService().listMyMatches();
+      if (list.isEmpty) return;
+      final cloud = MatchCloudPullService();
+      for (final m in list) {
+        final code = (m['matchCode'] as String?) ?? '';
+        if (code.isEmpty) continue;
+        await cloud.pullIntoLocal(code);
+      }
+      await loadHistory();
+    } finally {
+      isCloudSyncing.value = false;
     }
   }
 

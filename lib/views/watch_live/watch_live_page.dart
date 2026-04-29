@@ -4,11 +4,13 @@ import 'package:get/get.dart';
 import '../../core/constants/app_routes.dart';
 import '../../core/theme/app_theme.dart';
 import '../../services/firebase_sync_service.dart';
+import '../../services/network_service.dart';
 import '../../services/session_service.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WATCH LIVE PAGE
-// User manually enters Match Code + Password → opens LiveViewerPage
+// User manually enters Match Code → opens LiveViewerPage
+// (Password is no longer required — anyone with the code can watch.)
 // Route: AppRoutes.watchLive
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -22,10 +24,8 @@ class WatchLivePage extends StatefulWidget {
 class _WatchLivePageState extends State<WatchLivePage>
     with SingleTickerProviderStateMixin {
   final _codeCtrl = TextEditingController();
-  final _pwCtrl   = TextEditingController();
   final _sync     = FirebaseSyncService();
 
-  bool _obscure   = true;
   bool _loading   = false;
   String? _error;
 
@@ -48,60 +48,66 @@ class _WatchLivePageState extends State<WatchLivePage>
   @override
   void dispose() {
     _codeCtrl.dispose();
-    _pwCtrl.dispose();
     _animCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _join() async {
     final code = _codeCtrl.text.trim().toUpperCase();
-    final pw   = _pwCtrl.text.trim();
 
     // Validate
     if (code.isEmpty) {
       setState(() => _error = 'Please enter match code');
       return;
     }
-    if (pw.isEmpty) {
-      setState(() => _error = 'Please enter password');
+
+    // Watch live needs a live websocket — short-circuit when offline
+    // instead of letting matchExists hang on the network for ~30s.
+    if (!await NetworkService().requireOnline(action: 'join the live match')) {
+      setState(() => _error = 'No internet connection. Connect and retry.');
       return;
     }
 
     setState(() { _loading = true; _error = null; });
 
-    // Check match exists
-    final exists = await _sync.matchExists(code);
-    if (!exists) {
+    try {
+      // Check match exists — that's the only gate now. Password requirement
+      // was dropped: anyone with the share code can watch the live score.
+      final exists = await _sync
+          .matchExists(code)
+          .timeout(const Duration(seconds: 8));
+      if (!exists) {
+        setState(() {
+          _loading = false;
+          _error   = 'Match not found. Check the code and try again.';
+        });
+        HapticFeedback.heavyImpact();
+        return;
+      }
+
+      setState(() => _loading = false);
+      HapticFeedback.mediumImpact();
+
+      // ── Save session so app resume auto-rejoins ──────────────────────────
+      // Password field still exists in SessionService for back-compat; we
+      // just persist an empty string.
+      await SessionService().saveWatchLive(matchCode: code, password: '');
+
+      // Navigate → LiveViewerPage (already authenticated, skip gate)
+      Get.toNamed(
+        AppRoutes.liveViewer,
+        arguments: {'matchCode': code, 'authenticated': true},
+      );
+    } catch (e) {
+      // Network glitch / Firebase timeout — surface a clean message
+      // rather than the raw exception text.
+      if (!mounted) return;
       setState(() {
         _loading = false;
-        _error   = 'Match not found. Check the code and try again.';
+        _error   = 'Couldn\'t reach the match. Check your internet and retry.';
       });
       HapticFeedback.heavyImpact();
-      return;
     }
-
-    // Verify password
-    final ok = await _sync.verifyPassword(code, pw);
-    if (!ok) {
-      setState(() {
-        _loading = false;
-        _error   = 'Incorrect password. Ask the scorer for the correct password.';
-      });
-      HapticFeedback.heavyImpact();
-      return;
-    }
-
-    setState(() => _loading = false);
-    HapticFeedback.mediumImpact();
-
-    // ── Save session so app resume auto-rejoins ──────────────────────────────
-    await SessionService().saveWatchLive(matchCode: code, password: pw);
-
-    // Navigate → LiveViewerPage (already authenticated, skip gate)
-    Get.toNamed(
-      AppRoutes.liveViewer,
-      arguments: {'matchCode': code, 'authenticated': true},
-    );
   }
 
   @override
@@ -157,8 +163,8 @@ class _WatchLivePageState extends State<WatchLivePage>
                           SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              'Ask the scorer to share the Match Code and Password via WhatsApp. '
-                                  'Enter both below to watch live score.',
+                              'Ask the scorer to share the Match Code via WhatsApp. '
+                                  'Enter it below to watch the live score — no password needed.',
                               style: TextStyle(
                                 color: AppTheme.textSecondary,
                                 fontSize: 12,
@@ -182,69 +188,7 @@ class _WatchLivePageState extends State<WatchLivePage>
                       controller: _codeCtrl,
                       hint: 'e.g.  CS-CHMU-4821',
                       onChanged: (_) => setState(() => _error = null),
-                      onSubmitted: (_) => FocusScope.of(context).nextFocus(),
-                    ),
-
-                    const SizedBox(height: 18),
-
-                    // ── Password ──────────────────────────────────────────────
-                    _FieldLabel(
-                      icon: Icons.lock_rounded,
-                      label: 'PASSWORD',
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _pwCtrl,
-                      obscureText: _obscure,
-                      textInputAction: TextInputAction.done,
                       onSubmitted: (_) => _join(),
-                      onChanged: (_) => setState(() => _error = null),
-                      style: const TextStyle(
-                        color: AppTheme.textPrimary,
-                        fontSize: 16,
-                        letterSpacing: 3,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      decoration: InputDecoration(
-                        hintText: '••••••',
-                        hintStyle: TextStyle(
-                          color: AppTheme.textSecondary.withOpacity(0.4),
-                          letterSpacing: 4,
-                          fontSize: 16,
-                        ),
-                        filled: true,
-                        fillColor: AppTheme.bgCard,
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 16),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide:
-                          const BorderSide(color: AppTheme.borderColor),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide:
-                          const BorderSide(color: AppTheme.borderColor),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                              color: AppTheme.primaryLight, width: 1.5),
-                        ),
-                        prefixIcon: const Icon(Icons.shield_rounded,
-                            color: AppTheme.textSecondary, size: 20),
-                        suffixIcon: IconButton(
-                          icon: Icon(
-                            _obscure
-                                ? Icons.visibility_off_rounded
-                                : Icons.visibility_rounded,
-                            color: AppTheme.textSecondary,
-                            size: 20,
-                          ),
-                          onPressed: () =>
-                              setState(() => _obscure = !_obscure),
-                        ),
-                      ),
                     ),
 
                     // ── Error ─────────────────────────────────────────────────
@@ -430,7 +374,7 @@ class _CodeField extends StatelessWidget {
     return TextField(
       controller: controller,
       textCapitalization: TextCapitalization.characters,
-      textInputAction: TextInputAction.next,
+      textInputAction: TextInputAction.done,
       onChanged: onChanged,
       onSubmitted: onSubmitted,
       inputFormatters: [

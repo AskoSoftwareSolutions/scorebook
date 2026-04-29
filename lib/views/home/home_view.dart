@@ -6,6 +6,10 @@ import '../../services/ad_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../services/join_scorer_service.dart';
 import '../../services/session_service.dart';
+import '../../services/match_cloud_pull_service.dart';
+import '../../services/firebase_sync_service.dart';
+import '../../repositories/match_repository.dart';
+import '../../core/constants/app_constants.dart';
 import '../../widgets/app_widgets.dart';
 
 class HomeView extends StatefulWidget {
@@ -30,6 +34,15 @@ class _HomeViewState extends State<HomeView> {
       setState(() => _active = info);
     }
 
+    // ── Stale-resume guard: if this match was already finished elsewhere
+    //    (another scorer device completed innings 2 + closed the match),
+    //    silently clear the local resume pointer so we don't offer a
+    //    Resume button that would let the user re-score innings 2.
+    if (info != null) {
+      // ignore: unawaited_futures
+      _verifyActiveStillInProgress(info.matchId);
+    }
+
     // ── Auto-rejoin watch live if session exists ─────────────────────────────
     final watchInfo = await SessionService().getWatchLive();
     if (watchInfo != null && mounted) {
@@ -46,6 +59,39 @@ class _HomeViewState extends State<HomeView> {
         }
       });
     }
+  }
+
+  /// Best-effort cloud check — if the cloud says this match is completed
+  /// (because another device finished innings 2), pull the final state into
+  /// local SQLite, mark local as completed, and clear the resume pointer.
+  /// Errors are swallowed; offline users still see the Resume button.
+  Future<void> _verifyActiveStillInProgress(int localId) async {
+    try {
+      final cloud = MatchCloudPullService();
+      final code = await cloud.cloudCodeFor(localId);
+      if (code == null || code.isEmpty) return;
+      final data = await FirebaseSyncService().getMatchData(code);
+      final status = (data?['status'] as String?) ?? '';
+      if (status != 'completed') return;
+
+      // Pull the final cloud snapshot into local DB so summary/history are
+      // correct, then mark local match completed and clear the resume.
+      await cloud.pullIntoLocal(code);
+      try {
+        final repo = Get.isRegistered<MatchRepository>()
+            ? Get.find<MatchRepository>()
+            : MatchRepository();
+        final m = await repo.getMatch(localId);
+        if (m != null && m.status != AppConstants.matchStatusCompleted) {
+          await repo.updateMatch(m.copyWith(
+            status: AppConstants.matchStatusCompleted,
+            result: (data?['result'] as String?) ?? m.result,
+          ));
+        }
+      } catch (_) {}
+      await SessionService().clearActiveMatch();
+      if (mounted) setState(() => _active = null);
+    } catch (_) {/* offline — leave Resume visible */}
   }
 
   void _resume() {

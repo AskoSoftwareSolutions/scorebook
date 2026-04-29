@@ -54,10 +54,43 @@ class TournamentSetupViewModel extends GetxController {
   void onInit() {
     super.onInit();
     loadSavedTeams();
+    // Auto-pull players when the user types a team name that exactly
+    // matches a previously-saved team. Mirrors the behaviour in the
+    // single-match setup VM so saved rosters surface in either flow.
+    teamNameController.addListener(_autofillFromSaved);
   }
 
   Future<void> loadSavedTeams() async {
     savedTeams.assignAll(await _savedTeamService.getAll());
+  }
+
+  // Guard to stop the listener re-firing for the same name once we've
+  // already auto-applied it.
+  String _lastAutofillName = '';
+
+  void _autofillFromSaved() {
+    final raw = teamNameController.text.trim();
+    if (raw.isEmpty) return;
+    if (raw.toLowerCase() == _lastAutofillName) return;
+
+    SavedTeam? match;
+    for (final t in savedTeams) {
+      if (t.name.toLowerCase() == raw.toLowerCase()) {
+        match = t;
+        break;
+      }
+    }
+    if (match == null) return;
+
+    // Don't overwrite a roster the user has manually edited — only fill
+    // when the pending list is empty or is a strict subset of the saved
+    // team's roster.
+    final isFresh = pendingPlayers.isEmpty ||
+        pendingPlayers.every((p) => match!.players.contains(p));
+    if (!isFresh) return;
+
+    _lastAutofillName = raw.toLowerCase();
+    pendingPlayers.assignAll(match.players);
   }
 
   /// Saved teams whose name matches the current query (case-insensitive) and
@@ -235,6 +268,9 @@ class TournamentSetupViewModel extends GetxController {
     teamNameController.clear();
     pendingLogo.value = null;
     pendingPlayers.clear();
+    // Reset autofill guard so the next typed name is considered fresh
+    // even if it matches the previous entry.
+    _lastAutofillName = '';
   }
 
   Future<void> refreshTeams() async {

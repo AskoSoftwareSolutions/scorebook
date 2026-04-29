@@ -1,6 +1,7 @@
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/models.dart';
+import 'session_service.dart';
 
 /// Handles all Firebase Realtime Database sync for Online Mode.
 ///
@@ -120,7 +121,97 @@ class FirebaseSyncService {
         ..sort((a, b) =>
             (a['orderIndex'] as int).compareTo(b['orderIndex'] as int));
 
-      // ── FULL ball-by-ball log ─────────────────────────────────────────────
+      // Merge each roster against what's already in cloud so cross-device
+      // innings 1 batter stats survive a Phone-B innings-2 snapshot
+      // (and vice versa). For each player, take the higher of cloud/local
+      // for batting + bowling figures so neither device clobbers the other.
+      Future<List<Map<String, dynamic>>> _mergeRoster(
+        String childKey,
+        List<Map<String, dynamic>> mine,
+      ) async {
+        try {
+          final snap = await ref.child(childKey).get();
+          if (!snap.exists || snap.value is! List) return mine;
+          final cloud = (snap.value as List)
+              .where((e) => e is Map)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+          int _maxI(int a, int b) => a > b ? a : b;
+          bool _orB(bool a, bool b) => a || b;
+          final byName = {for (final m in mine) (m['name'] as String): m};
+          for (final c in cloud) {
+            final name = (c['name'] as String?) ?? '';
+            if (name.isEmpty) continue;
+            final m = byName[name];
+            if (m == null) {
+              byName[name] = c;
+              continue;
+            }
+            // Take higher batting numbers (cloud may carry inn-1 figures)
+            m['runsScored'] = _maxI(
+                (m['runsScored'] as int?) ?? 0, (c['runsScored'] as int?) ?? 0);
+            m['ballsFaced'] = _maxI(
+                (m['ballsFaced'] as int?) ?? 0, (c['ballsFaced'] as int?) ?? 0);
+            m['fours'] = _maxI(
+                (m['fours'] as int?) ?? 0, (c['fours'] as int?) ?? 0);
+            m['sixes'] = _maxI(
+                (m['sixes'] as int?) ?? 0, (c['sixes'] as int?) ?? 0);
+            m['didBat'] = _orB(
+                (m['didBat'] as bool?) ?? false,
+                (c['didBat'] as bool?) ?? false);
+            // isOut / wicket info: prefer the entry that says "out"
+            if (((c['isOut'] as bool?) ?? false) &&
+                !((m['isOut'] as bool?) ?? false)) {
+              m['isOut']       = c['isOut'];
+              m['wicketType']  = c['wicketType']  ?? m['wicketType'];
+              m['dismissedBy'] = c['dismissedBy'] ?? m['dismissedBy'];
+              m['bowlerName']  = c['bowlerName']  ?? m['bowlerName'];
+            }
+            // Bowling figures
+            m['ballsBowled']  = _maxI((m['ballsBowled']  as int?) ?? 0,
+                (c['ballsBowled']  as int?) ?? 0);
+            m['runsConceded'] = _maxI((m['runsConceded'] as int?) ?? 0,
+                (c['runsConceded'] as int?) ?? 0);
+            m['wicketsTaken'] = _maxI((m['wicketsTaken'] as int?) ?? 0,
+                (c['wicketsTaken'] as int?) ?? 0);
+            m['wides']        = _maxI((m['wides']        as int?) ?? 0,
+                (c['wides']        as int?) ?? 0);
+            m['noBalls']      = _maxI((m['noBalls']      as int?) ?? 0,
+                (c['noBalls']      as int?) ?? 0);
+          }
+          final out = byName.values.toList()
+            ..sort((a, b) => ((a['orderIndex'] as int?) ?? 0)
+                .compareTo((b['orderIndex'] as int?) ?? 0));
+          return out;
+        } catch (_) {
+          return mine;
+        }
+      }
+
+      final mergedRosterA = await _mergeRoster('rosterA', rosterA);
+      final mergedRosterB = await _mergeRoster('rosterB', rosterB);
+
+      // Take higher of cloud-vs-local for cross-innings totals so neither
+      // device clobbers the other side's authoritative final score.
+      Future<int> _maxFromCloud(String key, int local) async {
+        try {
+          final s = await ref.child(key).get();
+          if (!s.exists) return local;
+          final v = s.value;
+          if (v is int) return v > local ? v : local;
+        } catch (_) {}
+        return local;
+      }
+      final mergedTeamAScore   = await _maxFromCloud(
+          'teamAScore',   match.teamAScore   ?? 0);
+      final mergedTeamAWickets = await _maxFromCloud(
+          'teamAWickets', match.teamAWickets ?? 0);
+      final mergedTeamBScore   = await _maxFromCloud(
+          'teamBScore',   match.teamBScore   ?? 0);
+      final mergedTeamBWickets = await _maxFromCloud(
+          'teamBWickets', match.teamBWickets ?? 0);
+
+      // ── FULL ball-by-ball log (this device's authoritative balls) ────────
       final ballLog = allBalls
           .map((b) => {
         'over': b.overNumber,
@@ -141,6 +232,23 @@ class FirebaseSyncService {
         'innings': b.innings,
       })
           .toList();
+
+      // Build a merged ball log that preserves OTHER innings already in
+      // Firebase — important when Phone B (innings 2 scorer) pushes a
+      // snapshot that doesn't contain innings 1, and vice versa.
+      List<Map<String, dynamic>> mergedBallLog = ballLog;
+      try {
+        final myInningsSet = allBalls.map((b) => b.innings).toSet();
+        final existingSnap = await ref.child('balls').get();
+        if (existingSnap.exists && existingSnap.value is List) {
+          final existing = (existingSnap.value as List)
+              .where((e) => e is Map)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .where((m) => !myInningsSet.contains((m['innings'] as int?) ?? 1))
+              .toList();
+          mergedBallLog = [...existing, ...ballLog];
+        }
+      } catch (_) {/* fall back to local-only log */}
 
       // ── Current over balls only ───────────────────────────────────────────
       final currentOverBalls = allBalls
@@ -197,7 +305,26 @@ class FirebaseSyncService {
           ? (runsNeeded * 6.0 / ballsLeft)
           : 0.0;
 
-      await ref.set({
+      // ── Per-user match index for cross-device history ───────────────────
+      // /user_matches/{phone}/{matchCode} → summary card.
+      // Both the original scorer and the takeover scorer end up writing
+      // here from their own device → both phones can see this match in
+      // their cloud history.
+      final phone = await SessionService().getUserPhone();
+      if (phone != null && phone.trim().isNotEmpty) {
+        try {
+          await _db.ref('user_matches/$phone/$matchCode').update({
+            'matchCode': matchCode,
+            'teamA': match.teamAName,
+            'teamB': match.teamBName,
+            'status': match.status,
+            'totalOvers': match.totalOvers,
+            'updatedAt': ServerValue.timestamp,
+          });
+        } catch (_) {}
+      }
+
+      await ref.update({
         // ── Auth ──────────────────────────────────────────────────────────
         'passwordHash': passwordHash,
 
@@ -207,6 +334,12 @@ class FirebaseSyncService {
         'teamB': match.teamBName,
         'totalOvers': match.totalOvers,
         'status': match.status,
+
+        // ── Cross-innings totals (max-merged with cloud) ─────────────────
+        'teamAScore':   mergedTeamAScore,
+        'teamAWickets': mergedTeamAWickets,
+        'teamBScore':   mergedTeamBScore,
+        'teamBWickets': mergedTeamBWickets,
 
         // ── Tournament linkage (optional) ────────────────────────────────
         if (tournamentId != null && tournamentId.isNotEmpty)
@@ -251,11 +384,11 @@ class FirebaseSyncService {
         'bowlers': bowlers,
 
         // ── Full rosters (used by join-as-scorer) ────────────────────────
-        'rosterA': rosterA,
-        'rosterB': rosterB,
+        'rosterA': mergedRosterA,
+        'rosterB': mergedRosterB,
 
-        // ── Full ball log ─────────────────────────────────────────────────
-        'balls': ballLog,
+        // ── Full ball log (preserves other innings already in cloud) ─────
+        'balls': mergedBallLog,
 
         'updatedAt': ServerValue.timestamp,
       });
@@ -293,7 +426,44 @@ class FirebaseSyncService {
         'teamBWickets': match.teamBWickets ?? 0,
         'updatedAt': ServerValue.timestamp,
       });
+      // Mirror into user index so the cloud history card flips to
+      // "completed" without waiting for the next live snapshot.
+      final phone = await SessionService().getUserPhone();
+      if (phone != null && phone.trim().isNotEmpty) {
+        await _db.ref('user_matches/$phone/$matchCode').update({
+          'status': 'completed',
+          'result': result,
+          'updatedAt': ServerValue.timestamp,
+        });
+      }
     } catch (_) {}
+  }
+
+  /// List all matches the current phone has scored / joined as scorer,
+  /// across any device. Newest first.
+  Future<List<Map<String, dynamic>>> listMyMatches() async {
+    try {
+      await _ensureAuth();
+      final phone = await SessionService().getUserPhone();
+      if (phone == null || phone.trim().isEmpty) return [];
+      final snap = await _db.ref('user_matches/$phone').get();
+      if (!snap.exists) return [];
+      final raw = Map<String, dynamic>.from(snap.value as Map);
+      final list = <Map<String, dynamic>>[];
+      raw.forEach((code, value) {
+        final m = Map<String, dynamic>.from(value as Map);
+        m['matchCode'] = code;
+        list.add(m);
+      });
+      list.sort((a, b) {
+        final ua = (a['updatedAt'] as int?) ?? 0;
+        final ub = (b['updatedAt'] as int?) ?? 0;
+        return ub.compareTo(ua);
+      });
+      return list;
+    } catch (_) {
+      return [];
+    }
   }
 
   // ── Read ──────────────────────────────────────────────────────────────────

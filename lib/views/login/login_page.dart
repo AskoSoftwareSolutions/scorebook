@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/theme/app_theme.dart';
 import '../../services/fcm_service.dart';
+import '../../services/network_service.dart';
 import '../../services/session_service.dart';
 import '../../services/subscription_service.dart';
 
@@ -67,11 +68,18 @@ class _LoginPageState extends State<LoginPage>
       setState(() => _error = 'Enter a valid 10-digit mobile number');
       return;
     }
+    // Block early if offline — Firebase Phone Auth would otherwise hang
+    // for ~60s before throwing an opaque "network error".
+    if (!await NetworkService().requireOnline(action: 'send the OTP')) {
+      setState(() => _error = 'No internet connection. Connect and retry.');
+      return;
+    }
     final phone = raw.startsWith('+') ? raw : '+91$raw';
 
     setState(() { _loading = true; _error = null; });
 
-    await _auth.verifyPhoneNumber(
+    try {
+      await _auth.verifyPhoneNumber(
       phoneNumber: phone,
       forceResendingToken: _resendToken,
       timeout: const Duration(seconds: 60),
@@ -103,6 +111,13 @@ class _LoginPageState extends State<LoginPage>
         _verificationId = id;
       },
     );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Could not reach the server. Check your internet and retry.';
+      });
+    }
   }
 
   void _startResendCooldown() {
@@ -123,6 +138,10 @@ class _LoginPageState extends State<LoginPage>
       return;
     }
     if (_verificationId == null) return;
+    if (!await NetworkService().requireOnline(action: 'verify the OTP')) {
+      setState(() => _error = 'No internet connection. Connect and retry.');
+      return;
+    }
 
     setState(() { _loading = true; _error = null; });
 
@@ -157,6 +176,15 @@ class _LoginPageState extends State<LoginPage>
       setState(() {
         _loading = false;
         _error   = e.message ?? 'Invalid OTP. Try again.';
+      });
+      HapticFeedback.heavyImpact();
+    } catch (e) {
+      // Network or unknown error — surface a friendly message instead
+      // of leaving the user staring at a spinner forever.
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error   = 'Sign-in failed. Check your internet and try again.';
       });
       HapticFeedback.heavyImpact();
     }

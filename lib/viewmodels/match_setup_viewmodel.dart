@@ -39,10 +39,16 @@ class MatchSetupViewModel extends GetxController {
   @override
   void onInit() {
     super.onInit();
-    _loadSavedTeams();
+    loadSavedTeams();
+    // Auto-pull players when user types a team name that exactly matches
+    // a previously-saved team. Cross-flow recall: works for both freshly
+    // created matches and matches whose teams were saved in tournaments.
+    teamAController.addListener(() => _autofillFromSaved(isTeamA: true));
+    teamBController.addListener(() => _autofillFromSaved(isTeamA: false));
   }
 
-  Future<void> _loadSavedTeams() async {
+  /// Public so views can refresh after returning from another flow.
+  Future<void> loadSavedTeams() async {
     final teams = await _teamService.getAll();
     savedTeams.assignAll(teams);
   }
@@ -65,6 +71,39 @@ class MatchSetupViewModel extends GetxController {
     }
   }
 
+  // Autofill guard so we don't recursively trigger via setText below.
+  String _lastAutofillA = '';
+  String _lastAutofillB = '';
+
+  void _autofillFromSaved({required bool isTeamA}) {
+    final raw = (isTeamA ? teamAController.text : teamBController.text).trim();
+    if (raw.isEmpty) return;
+    final lastKey = isTeamA ? _lastAutofillA : _lastAutofillB;
+    if (raw.toLowerCase() == lastKey) return;
+    SavedTeam? match;
+    for (final t in savedTeams) {
+      if (t.name.toLowerCase() == raw.toLowerCase()) {
+        match = t;
+        break;
+      }
+    }
+    if (match == null) return;
+    final currentPlayers = isTeamA ? teamAPlayers : teamBPlayers;
+    // Only auto-replace when the side has no players yet, or the user
+    // hasn't manually changed the player list. We check via "all players
+    // are a subset of the saved team's players" — strict but safe.
+    final isFresh = currentPlayers.isEmpty ||
+        currentPlayers.every((p) => match!.players.contains(p));
+    if (!isFresh) return;
+    if (isTeamA) {
+      _lastAutofillA = raw.toLowerCase();
+      teamAPlayers.assignAll(match.players);
+    } else {
+      _lastAutofillB = raw.toLowerCase();
+      teamBPlayers.assignAll(match.players);
+    }
+  }
+
   /// Save current team A or B to saved teams
   Future<void> saveCurrentTeam({required bool isTeamA}) async {
     final name = isTeamA
@@ -84,7 +123,7 @@ class MatchSetupViewModel extends GetxController {
     }
 
     await _teamService.saveTeam(name, players.toList());
-    await _loadSavedTeams();
+    await loadSavedTeams();
     Get.snackbar('Saved', '"$name" saved with ${players.length} players',
         snackPosition: SnackPosition.BOTTOM,
         backgroundColor: const Color(0xFF1B5E20),
@@ -94,7 +133,7 @@ class MatchSetupViewModel extends GetxController {
   /// Delete a saved team by name
   Future<void> deleteSavedTeam(String name) async {
     await _teamService.deleteTeam(name);
-    await _loadSavedTeams();
+    await loadSavedTeams();
   }
 
   @override
@@ -213,9 +252,12 @@ class MatchSetupViewModel extends GetxController {
       final teamA = teamAController.text.trim();
       final teamB = teamBController.text.trim();
 
-      // Auto-save teams when starting a match
+      // Auto-save teams when starting a match (so next time the user types
+      // the same team name in either New-Match or Tournament forms, the
+      // player list autofills).
       await _teamService.saveTeam(teamA, teamAPlayers.toList());
       await _teamService.saveTeam(teamB, teamBPlayers.toList());
+      await loadSavedTeams();
 
       // 1. Create match record
       final match = MatchModel(
