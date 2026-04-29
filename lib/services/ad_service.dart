@@ -5,10 +5,13 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AD SERVICE
-// Rewarded Interstitial Video:
-//   - Shows on: Match Start, Wicket, Over Complete
-//   - Video plays for 5 seconds → Skip button appears
-//   - No banner ads
+//
+// Only ONE ad unit is configured in AdMob console:
+//   match_end_interstitial → ca-app-pub-5068572099745859/9112745906 (Interstitial)
+//
+// No banner. No rewarded. Just this single Interstitial.
+// Public API (showRewardedVideo / showInterstitial / buildBanner) is preserved
+// so existing call sites continue to compile — but only the Interstitial runs.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class AdService with WidgetsBindingObserver {
@@ -16,35 +19,36 @@ class AdService with WidgetsBindingObserver {
   factory AdService() => _i;
   AdService._();
 
-  // ── flip to false after AdMob approval ───────────────────────────────────
-  static const bool _useTestAds = false; // Production ready! false kodutha production
+  // ── flip to true during dev to force test creatives ──────────────────────
+  static const bool _useTestAds = false;
 
-// Test IDs (Google official)
-  static const _tRewarded    = 'ca-app-pub-3940256099942544/5354046379';
-  static const _tRewardedIos = 'ca-app-pub-3940256099942544/6978759866';
+  // Google official test IDs (used only when _useTestAds = true)
+  static const _tInterstitial    = 'ca-app-pub-3940256099942544/1033173712';
+  static const _tInterstitialIos = 'ca-app-pub-3940256099942544/4411468910';
 
-// Your Real IDs ✅
-  static const _rRewarded    = 'ca-app-pub-5068572099745859/7663096771';
-  static const _rRewardedIos = 'ca-app-pub-5068572099745859/7663096771';
+  // Production Interstitial ID (match_end_interstitial)
+  static const _rInterstitial = 'ca-app-pub-5068572099745859/9112745906';
 
-  static String get _rewardedId =>
-      _useTestAds ? (Platform.isIOS ? _tRewardedIos : _tRewarded)
-          : (Platform.isIOS ? _rRewardedIos  : _rRewarded);
+  static String get _interstitialId => _useTestAds
+      ? (Platform.isIOS ? _tInterstitialIos : _tInterstitial)
+      : _rInterstitial;
 
-  bool _initialized    = false;
-  bool _adsEnabled     = true;
+  bool _initialized = false;
+  bool _adsEnabled  = true;
 
-  // ── Rewarded Interstitial state ───────────────────────────────────────────
-  RewardedInterstitialAd? _rewardedAd;
-  bool _rewardedReady   = false;
-  bool _rewardedPending = false;
-  bool _isShowing       = false;
+  // ── Interstitial state ───────────────────────────────────────────────────
+  InterstitialAd? _interstitialAd;
+  bool _interstitialReady   = false;
+  bool _interstitialPending = false;
+  bool _isShowing           = false;
 
-  // ── Cooldown — prevent multiple ads back to back ──────────────────────────
+  // ── Cooldown — prevent multiple ads back to back ─────────────────────────
   DateTime? _lastShown;
-  static const _cooldown = Duration(seconds: 60); // min 60sec between ads
+  static const _cooldown = Duration(seconds: 60); // min 60s between ads
 
-  // ── Initialize ────────────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  // INITIALIZE
+  // ══════════════════════════════════════════════════════════════════════════
   Future<void> initialize() async {
     if (_initialized) return;
     await MobileAds.instance.initialize();
@@ -54,88 +58,93 @@ class AdService with WidgetsBindingObserver {
         testDeviceIds: ['5204E240A3034C8E3DEDD3F2343A89D9'],
       ),
     );
-    print('[AdService] initialized — testAds=$_useTestAds  id=$_rewardedId');
-    _loadRewarded();
+    debugPrint(
+      '[AdService] initialized — testAds=$_useTestAds  interstitial=$_interstitialId',
+    );
+    _loadInterstitial();
   }
 
-  // ── Subscription control ──────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  // SUBSCRIPTION CONTROL
+  // ══════════════════════════════════════════════════════════════════════════
   void setAdsEnabled(bool enabled) {
     _adsEnabled = enabled;
     if (!enabled) {
-      _rewardedAd?.dispose();
-      _rewardedAd     = null;
-      _rewardedReady  = false;
-      _rewardedPending = false;
+      _interstitialAd?.dispose();
+      _interstitialAd      = null;
+      _interstitialReady   = false;
+      _interstitialPending = false;
     } else {
-      _loadRewarded();
+      _loadInterstitial();
     }
   }
 
   bool get adsEnabled => _adsEnabled;
 
-  // No banner
-  Widget buildBanner() => const SizedBox.shrink();
+  // No banner ads — return empty widget so existing call sites stay safe.
+  Widget buildBanner({AdSize size = AdSize.banner}) =>
+      const SizedBox.shrink();
 
-  // ── Cooldown check ────────────────────────────────────────────────────────
+  // ── Cooldown check ───────────────────────────────────────────────────────
   bool get _canShow {
     if (_lastShown == null) return true;
     return DateTime.now().difference(_lastShown!) >= _cooldown;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // LOAD
+  // LOAD INTERSTITIAL
   // ══════════════════════════════════════════════════════════════════════════
-  void _loadRewarded() {
+  void _loadInterstitial() {
     if (!_adsEnabled || !_initialized) return;
-    if (_rewardedAd != null) return;
+    if (_interstitialAd != null) return;
 
-    print('[AdService] loading rewarded interstitial...');
+    debugPrint('[AdService] loading interstitial...');
 
-    RewardedInterstitialAd.load(
-      adUnitId: _rewardedId,
+    InterstitialAd.load(
+      adUnitId: _interstitialId,
       request: const AdRequest(),
-      rewardedInterstitialAdLoadCallback: RewardedInterstitialAdLoadCallback(
+      adLoadCallback: InterstitialAdLoadCallback(
         onAdLoaded: (ad) {
-          print('[AdService] rewarded LOADED ✅');
-          _rewardedAd   = ad;
-          _rewardedReady = true;
+          debugPrint('[AdService] interstitial LOADED');
+          _interstitialAd    = ad;
+          _interstitialReady = true;
 
           ad.fullScreenContentCallback = FullScreenContentCallback(
             onAdShowedFullScreenContent: (_) {
-              _isShowing  = true;
-              _lastShown  = DateTime.now();
-              print('[AdService] rewarded SHOWING 🎬');
+              _isShowing = true;
+              _lastShown = DateTime.now();
+              debugPrint('[AdService] interstitial SHOWING');
             },
             onAdDismissedFullScreenContent: (ad) {
-              print('[AdService] rewarded dismissed — reloading');
-              _isShowing    = false;
+              debugPrint('[AdService] interstitial dismissed — reloading');
+              _isShowing = false;
               ad.dispose();
-              _rewardedAd   = null;
-              _rewardedReady = false;
-              _loadRewarded(); // preload next
+              _interstitialAd    = null;
+              _interstitialReady = false;
+              _loadInterstitial(); // preload next
             },
             onAdFailedToShowFullScreenContent: (ad, err) {
-              print('[AdService] rewarded show FAILED: $err');
-              _isShowing    = false;
+              debugPrint('[AdService] interstitial show FAILED: $err');
+              _isShowing = false;
               ad.dispose();
-              _rewardedAd   = null;
-              _rewardedReady = false;
-              _loadRewarded();
+              _interstitialAd    = null;
+              _interstitialReady = false;
+              _loadInterstitial();
             },
           );
 
-          // If pending show was requested before load completed
-          if (_rewardedPending) {
-            _rewardedPending = false;
+          // If a show was requested before load completed
+          if (_interstitialPending) {
+            _interstitialPending = false;
             _showAd();
           }
         },
         onAdFailedToLoad: (err) {
-          print('[AdService] rewarded load FAILED: $err');
-          _rewardedAd      = null;
-          _rewardedReady   = false;
-          _rewardedPending = false;
-          Future.delayed(const Duration(seconds: 30), _loadRewarded);
+          debugPrint('[AdService] interstitial load FAILED: $err');
+          _interstitialAd      = null;
+          _interstitialReady   = false;
+          _interstitialPending = false;
+          Future.delayed(const Duration(seconds: 30), _loadInterstitial);
         },
       ),
     );
@@ -146,34 +155,36 @@ class AdService with WidgetsBindingObserver {
   // ══════════════════════════════════════════════════════════════════════════
   void _showAd() {
     if (!_adsEnabled || _isShowing) return;
-    if (_rewardedReady && _rewardedAd != null) {
-      _rewardedAd!.show(
-        onUserEarnedReward: (_, reward) {
-          print('[AdService] reward earned ✅');
-        },
-      );
+    if (_interstitialReady && _interstitialAd != null) {
+      _interstitialAd!.show();
     }
   }
 
-  /// Call this on: Match Start, Wicket, Over Complete
-  void showRewardedVideo() {
+  /// Show the interstitial. Silently preloads if not ready.
+  void showInterstitial() {
     if (!_adsEnabled) return;
-    print('[AdService] showRewardedVideo — ready=$_rewardedReady  canShow=$_canShow');
+    debugPrint(
+      '[AdService] showInterstitial — ready=$_interstitialReady  canShow=$_canShow',
+    );
 
     if (!_canShow) {
-      print('[AdService] cooldown active — skipping');
+      final secs = _lastShown == null
+          ? 0
+          : DateTime.now().difference(_lastShown!).inSeconds;
+      debugPrint('[AdService] cooldown ($secs/${_cooldown.inSeconds}s) — skipping');
       return;
     }
 
-    if (_rewardedReady && _rewardedAd != null) {
+    if (_interstitialReady && _interstitialAd != null) {
       _showAd();
     } else {
       // Ad not ready — mark pending, load now, show when loaded
-      _rewardedPending = true;
-      _loadRewarded();
+      _interstitialPending = true;
+      _loadInterstitial();
     }
   }
 
-  // Keep showInterstitial as alias for compatibility
-  void showInterstitial() => showRewardedVideo();
+  /// Backwards-compat alias. There is no rewarded ad anymore — this just
+  /// shows the standard Interstitial so existing call sites keep working.
+  void showRewardedVideo() => showInterstitial();
 }
