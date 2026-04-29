@@ -43,6 +43,10 @@ class LiveScoringViewModel extends GetxController {
   final RxBool _newBatsmanAtStriker = true.obs;
   bool get newBatsmanAtStriker => _newBatsmanAtStriker.value;
 
+  /// Fires true when batting team is "all out" but total players is small
+  /// (<11) — scorer should choose to ADD MORE PLAYERS or END INNINGS.
+  final RxBool needAddMorePlayersDecision = false.obs;
+
   // ── Extras in current ball ────────────────────────────────────────────────
   final RxBool isWide = false.obs;
   final RxBool isNoBall = false.obs;
@@ -583,10 +587,27 @@ class LiveScoringViewModel extends GetxController {
     final inn = currentInnings.value!;
     final match = this.match.value!;
     final maxBalls = match.totalOvers * 6;
-    final allOut = inn.totalWickets >= _getBattingTeamSize() - 1;
+    final teamSize = _getBattingTeamSize();
+    final allOut = inn.totalWickets >= teamSize - 1;
     final oversUp = inn.totalBalls >= maxBalls;
 
-    if (allOut || oversUp) {
+    // 2nd innings: winning by reaching target (1st innings total + 1) ends match.
+    bool targetReached = false;
+    if (inn.inningsNumber == 2) {
+      final firstInningsTotal = inn.battingTeam == match.teamAName
+          ? (match.teamBScore ?? 0)   // team A is batting now → team B batted first
+          : (match.teamAScore ?? 0);  // team B is batting now → team A batted first
+      final target = firstInningsTotal + 1;
+      if (inn.totalRuns >= target) targetReached = true;
+    }
+
+    // Small team "all out" (size < 11) → don't auto-progress. Ask scorer.
+    if (allOut && !oversUp && !targetReached && teamSize < 11) {
+      needAddMorePlayersDecision.value = true;
+      return;
+    }
+
+    if (allOut || oversUp || targetReached) {
       inn.isCompleted = true;
       await _repo.updateInnings(inn);
       isInningsComplete.value = true;
@@ -596,6 +617,20 @@ class LiveScoringViewModel extends GetxController {
       } else {
         await _completeMatch();
       }
+    }
+  }
+
+  /// Called from the view after user chose "End Innings" in the add-more
+  /// players prompt. Forces the current innings to finalise.
+  Future<void> forceEndInnings() async {
+    final inn = currentInnings.value!;
+    inn.isCompleted = true;
+    await _repo.updateInnings(inn);
+    isInningsComplete.value = true;
+    if (inn.inningsNumber == 1) {
+      await _startInnings2();
+    } else {
+      await _completeMatch();
     }
   }
 
